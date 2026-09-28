@@ -42,8 +42,6 @@ wx-cli 提供了最关键的两样东西：完整的历史上下文，以及持�
 
 ## 前置条件
 
-已有有效密钥时，消息查询和本地图片读取无需关闭 SIP。下面的系统权限要求用于提取新密钥。
-
 密钥提取**需要 SIP 关闭**（SIP enabled 时 `task_for_pid` 被内核拒绝，即使 root 也不行），通常不需要 sudo。如果你已有密钥，可以跳过 SIP 要求，直接用 `key set` 手动录入。
 
 `key extract`（LLDB 方式）还需要：
@@ -223,18 +221,6 @@ ignore_tags = ["同事", "客户"]
 ```
 
 本地命令支持 `--show-hidden` 忽略隐藏规则查看完整结果。`search` 当前不会自动应用隐藏配置。
-
-## 按需读取与工作提炼
-
-本 fork 增加可选的 [微信工作助手](tools/wechat-work/README.md)，供 Codex、Claude Code 按会话和日期读取消息、提取图片，并准备带消息出处的材料。理解和工作建议由当前 AI 会话完成；读取工具独立于 Dashboard，也无需启动 HTTP 服务。
-
-```sh
-python3 tools/wechat-work/install.py --account-dir '/path/to/xwechat_files/account'
-~/.local/bin/wechat-work status
-~/.local/bin/wechat-work sessions --limit 40
-```
-
-原生 `wx-cli` 继续负责数据读取、密钥管理和媒体解码；工作助手提供范围限制、常见敏感字段过滤、图片回退和临时材料清理。它不发送消息，不调用额外模型服务。
 
 ## 文件路径
 
