@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -76,8 +77,13 @@ impl KeyStore {
             return Ok(Self::default());
         }
         let content = fs::read_to_string(path)?;
-        toml::from_str(&content)
-            .map_err(|e| KeychainError::Store(format!("failed to parse {}: {}", path.display(), e)))
+        // TOML diagnostics can include the source line, which may contain a key.
+        toml::from_str(&content).map_err(|_| {
+            KeychainError::Store(format!(
+                "failed to parse {}: invalid key store TOML",
+                path.display()
+            ))
+        })
     }
 
     /// Save to the default path.
@@ -88,28 +94,48 @@ impl KeyStore {
 
     /// Save to a specific path, creating parent directories as needed.
     ///
-    /// Uses atomic write (write to `.tmp` sibling, then `rename`) to prevent
-    /// partial TOML files on crash.
+    /// Uses a private, uniquely named sibling and atomic replacement to prevent
+    /// partial TOML files and avoid following a pre-existing temporary symlink.
     pub fn save(&self, path: &Path) -> Result<(), KeychainError> {
-        let parent_existed = path.parent().is_none_or(|p| p.exists());
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        // Only adjust ownership of directories this save creates. In sudo runs,
+        // leaving any newly private ancestor owned by root would block the user.
+        let new_parents: Vec<_> = parent
+            .ancestors()
+            .take_while(|p| !p.as_os_str().is_empty() && !p.exists())
+            .map(Path::to_path_buf)
+            .collect();
+        let mut directories = fs::DirBuilder::new();
+        directories.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            directories.mode(0o700);
         }
+        directories.create(parent)?;
         let content = toml::to_string_pretty(self)
             .map_err(|e| KeychainError::Store(format!("failed to serialize: {}", e)))?;
 
-        let tmp_path = path.with_extension("toml.tmp");
-        fs::write(&tmp_path, &content)?;
-        fs::rename(&tmp_path, path).inspect_err(|_| {
-            // Clean up the temp file on rename failure.
-            let _ = fs::remove_file(&tmp_path);
-        })?;
+        let mut temporary = tempfile::Builder::new()
+            .prefix(".keys-")
+            .tempfile_in(parent)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            temporary
+                .as_file()
+                .set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
+        temporary.write_all(content.as_bytes())?;
+        temporary.as_file().sync_all()?;
+        temporary.persist(path).map_err(|e| e.error)?;
 
         wx_paths::sudo::chown_to_sudo_user(path);
-        if !parent_existed {
-            if let Some(parent) = path.parent() {
-                wx_paths::sudo::chown_to_sudo_user(parent);
-            }
+        for directory in new_parents.iter().rev() {
+            wx_paths::sudo::chown_to_sudo_user(directory);
         }
         Ok(())
     }
@@ -355,6 +381,77 @@ impl KeyStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn save_roundtrip_and_malformed_store_do_not_expose_keys() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("keys.toml");
+        let mut store = KeyStore::default();
+        store.set("test_account", "synthetic-secret", "test", None, None);
+        store.save(&path).unwrap();
+        assert_eq!(
+            KeyStore::load(&path)
+                .unwrap()
+                .get("test_account")
+                .unwrap()
+                .data_key,
+            "synthetic-secret"
+        );
+        fs::write(&path, "data_key = \"synthetic-secret\" invalid").unwrap();
+        let error = KeyStore::load(&path).unwrap_err().to_string();
+        assert!(error.contains("invalid key store TOML"));
+        assert!(!error.contains("synthetic-secret"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_creates_private_keys_and_replaces_permissive_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config/nested/keys.toml");
+        let store = KeyStore::default();
+        store.save(&path).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(path.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        store.save(&path).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_does_not_follow_predictable_temporary_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("keys.toml");
+        let other = temp.path().join("unrelated.txt");
+        fs::write(&other, "preserve me").unwrap();
+        std::os::unix::fs::symlink(&other, path.with_extension("toml.tmp")).unwrap();
+        KeyStore::default().save(&path).unwrap();
+        assert_eq!(fs::read_to_string(other).unwrap(), "preserve me");
+        assert!(KeyStore::load(&path).is_ok());
+    }
+
+    #[test]
+    fn failed_save_cleans_up_temporary_key_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("keys.toml");
+        fs::create_dir(&path).unwrap();
+        assert!(KeyStore::default().save(&path).is_err());
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
+    }
 
     #[test]
     fn test_old_keys_toml_without_nickname_base_wxid() {

@@ -121,6 +121,69 @@ fn resolve_image_by_md5_no_dat_files() {
     assert!(matches!(result, Err(MediaError::NoDatFiles { .. })));
 }
 
+#[test]
+fn resolve_image_ignores_prefix_collisions_and_non_files() {
+    let tmp = TempDir::new().unwrap();
+    let username = "testuser";
+    let username_hash = format!("{:x}", md5::compute(username.as_bytes()));
+    let digest = "a".repeat(32);
+    create_attach_dir(
+        tmp.path(),
+        &username_hash,
+        "2026-09",
+        &digest,
+        &["_backup", "0", "_t"],
+    );
+    let folder = tmp
+        .path()
+        .join("msg/attach")
+        .join(&username_hash)
+        .join("2026-09/Img");
+    fs::create_dir(folder.join(format!("{digest}_h.dat"))).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(
+        folder.join(format!("{digest}_t.dat")),
+        folder.join(format!("{digest}.dat")),
+    )
+    .unwrap();
+    let result =
+        wx_media::resolve_image_by_md5(username, &tmp.path().join("msg/attach"), &digest).unwrap();
+    assert_eq!(
+        result.candidates,
+        vec![folder.join(format!("{digest}_t.dat"))]
+    );
+    assert_eq!(result.recommended, result.candidates.first().cloned());
+}
+
+#[test]
+fn resolve_image_prefers_hd_across_months_and_plain_before_thumbnail() {
+    let tmp = TempDir::new().unwrap();
+    let username = "testuser";
+    let username_hash = format!("{:x}", md5::compute(username.as_bytes()));
+    let digest = "b".repeat(32);
+    create_attach_dir(tmp.path(), &username_hash, "2026-09", &digest, &["_t", ""]);
+    create_attach_dir(tmp.path(), &username_hash, "2026-08", &digest, &["_h"]);
+    let attach = tmp.path().join("msg/attach");
+    let hd = attach
+        .join(&username_hash)
+        .join("2026-08/Img")
+        .join(format!("{digest}_h.dat"));
+    let result = wx_media::resolve_image_by_md5(username, &attach, &digest).unwrap();
+    assert_eq!(result.recommended, Some(hd.clone()));
+    fs::remove_file(hd).unwrap();
+    let result = wx_media::resolve_image_by_md5(username, &attach, &digest).unwrap();
+    assert_eq!(
+        result
+            .recommended
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        format!("{digest}.dat")
+    );
+}
+
 // ── image resolver integration tests ─────────────────────────────────
 
 #[test]
