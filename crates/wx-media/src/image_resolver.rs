@@ -43,7 +43,7 @@ pub fn resolve_image(
         });
     }
 
-    // Step 4: Recommend best file (original > _h > _t)
+    // Step 4: Recommend best file (_h > plain > _t)
     let recommended = pick_recommended(&candidates, &file_md5);
 
     Ok(MediaLookupResult {
@@ -80,9 +80,14 @@ pub fn resolve_image_by_md5(
     })
 }
 
-/// Find all `.dat` files matching `<md5>*.dat` under `<base>/*/Img/`.
+/// Find the three known cache variants under `<base>/*/Img/`.
 fn find_dat_files(base: &Path, file_md5: &str) -> Vec<PathBuf> {
     let mut results = Vec::new();
+    let names = [
+        format!("{file_md5}.dat"),
+        format!("{file_md5}_h.dat"),
+        format!("{file_md5}_t.dat"),
+    ];
 
     let entries = match std::fs::read_dir(base) {
         Ok(e) => e,
@@ -104,7 +109,9 @@ fn find_dat_files(base: &Path, file_md5: &str) -> Vec<PathBuf> {
         for file_entry in inner.flatten() {
             let name = file_entry.file_name();
             let name_str = name.to_string_lossy();
-            if name_str.starts_with(file_md5) && name_str.ends_with(".dat") {
+            if names.iter().any(|name| name == &name_str)
+                && file_entry.file_type().is_ok_and(|t| t.is_file())
+            {
                 results.push(file_entry.path());
             }
         }
@@ -135,6 +142,13 @@ fn pick_recommended(candidates: &[PathBuf], file_md5: &str) -> Option<PathBuf> {
         return Some(p.clone());
     }
 
-    // Fallback to first available
-    candidates.first().cloned()
+    // Only the thumbnail variant is a valid final fallback.
+    let thumbnail = format!("{file_md5}_t.dat");
+    candidates
+        .iter()
+        .find(|p| {
+            p.file_name()
+                .is_some_and(|n| n.to_string_lossy() == thumbnail)
+        })
+        .cloned()
 }

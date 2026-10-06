@@ -46,8 +46,7 @@ pub fn cmd_media(action: MediaAction) -> Result<(), Box<dyn std::error::Error>> 
             } else if let Some(ref dir) = data_dir {
                 let key = wx_media::derive_v2_key_from_dir(dir)
                     .map_err(|e| format!("V2 key derivation from --data-dir failed: {e}"))?;
-                let key_preview = String::from_utf8_lossy(&key[..8]);
-                eprintln!("Derived V2 key from UIN+WXID: {key_preview}...");
+                eprintln!("Derived V2 image key from account data");
                 Some(key)
             } else {
                 None
@@ -64,8 +63,8 @@ pub fn cmd_media(action: MediaAction) -> Result<(), Box<dyn std::error::Error>> 
 
                 let xor = explicit_xor.or_else(|| {
                     let detected = wx_media::detect_xor_key(&input);
-                    if let Some(k) = detected {
-                        eprintln!("Auto-detected XOR key: 0x{k:02x}");
+                    if detected.is_some() {
+                        eprintln!("Auto-detected XOR key");
                     }
                     detected
                 });
@@ -124,8 +123,8 @@ pub fn cmd_media(action: MediaAction) -> Result<(), Box<dyn std::error::Error>> 
                 let xor = explicit_xor.or_else(|| {
                     input.parent().and_then(|dir| {
                         let detected = wx_media::detect_xor_key(dir);
-                        if let Some(k) = detected {
-                            eprintln!("Auto-detected XOR key: 0x{k:02x}");
+                        if detected.is_some() {
+                            eprintln!("Auto-detected XOR key");
                         }
                         detected
                     })
